@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
+import org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery;
 import org.telegram.telegrambots.meta.api.methods.send.SendDocument;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.methods.send.SendPhoto;
@@ -59,7 +60,7 @@ public class RashBot extends TelegramLongPollingBot {
 
     @Override
     public void onUpdateReceived(Update update) {
-        if (update.hasMessage()) {
+        if (update.hasMessage() && update.getMessage().hasText()) {
             handleMessage(update.getMessage());
         } else if (update.hasCallbackQuery()) {
             handleCallback(update.getCallbackQuery());
@@ -70,21 +71,20 @@ public class RashBot extends TelegramLongPollingBot {
         String text = message.getText();
         Long chatId = message.getChatId();
         User tgUser = message.getFrom();
+        String adminIdStr = botConfig.getAdminId();
 
-        if (text == null) return;
+        boolean isAdmin = chatId.toString().equals(adminIdStr);
 
-        // 1. Admin komandalari
-        boolean isAdmin = chatId.toString().equals(botConfig.getAdminId());
+        // 1. Admin uchun aktivlashtirish buyrug'i
         if (isAdmin && text.startsWith("/verify_")) {
             processVerification(text);
             return;
         }
 
-        // 2. Start mantiqi
+        // 2. Start buyrug'i
         if (text.equals("/start")) {
             if (isAdmin) {
-                sendTextMessage(chatId, "Xush kelibsiz, Admin! Sizda testga to'liq ruxsat bor. \n/test yozib tekshirib ko'rishingiz mumkin.");
-                // Adminni avtomatik VIP qilish
+                sendTextMessage(chatId, "📌 *Xush kelibsiz, Admin!*\nSizda tizimga to'liq ruxsat bor. Yangi foydalanuvchilar haqida xabarnomalarni shu yerda olasiz.\n\nTestni tekshirish uchun: /test");
                 AppUser adminUser = userRepository.findById(chatId).orElse(new AppUser(chatId, tgUser.getFirstName(), tgUser.getUserName(), true));
                 adminUser.setHasAccess(true);
                 userRepository.save(adminUser);
@@ -97,40 +97,46 @@ public class RashBot extends TelegramLongPollingBot {
         // 3. Testni boshlash
         if (text.equals("/test")) {
             AppUser user = userRepository.findById(chatId).orElse(null);
-            // Admin bo'lsa yoki hasAccess true bo'lsa
             if (isAdmin || (user != null && Boolean.TRUE.equals(user.getHasAccess()))) {
                 startTestProcess(chatId);
             } else {
-                sendTextMessage(chatId, "⛔️ *Sizda ruxsat yo'q!* \nIltimos, to'lov qiling.");
+                sendTextMessage(chatId, "⛔️ *Sizda ruxsat mavjud emas!*\n\nTestda ishtirok etish uchun to'lovni amalga oshiring va adminga murojaat qiling.");
             }
             return;
         }
 
-        // 4. Ochiq savollar
+        // 4. Test davomida ochiq savollarga javob berish
         if (states.containsKey(chatId)) {
             handleTextAnswer(chatId, text);
         }
     }
 
     private void registerAndNotifyAdmin(User tgUser, Long chatId) {
-        // Foydalanuvchi allaqachon ruxsatga ega bo'lsa qaytib yuboramiz
         AppUser user = userRepository.findById(chatId).orElse(null);
-        if (user != null && user.getHasAccess()) {
-            sendTextMessage(chatId, "Sizda ruxsat bor. /test buyrug'ini bosing.");
-            return;
-        }
 
         if (user == null) {
             user = new AppUser(chatId, tgUser.getFirstName(), tgUser.getUserName(), false);
             userRepository.save(user);
         }
 
-        // Adminga xabar
-        String adminMsg = String.format("🆕 Yangi user: %s (ID: %d)\nUser: @%s\n\nTasdiqlash: /verify_%d",
-                tgUser.getFirstName(), chatId, (tgUser.getUserName()!=null?tgUser.getUserName():"yo'q"), chatId);
-        sendTextMessage(Long.parseLong(botConfig.getAdminId()), adminMsg);
-
-        sendTextMessage(chatId, "👋 Botga xush kelibsiz! Testga ruxsat olish uchun to'lov qiling va admin tasdiqlashini kuting.");
+        // Agar userda ruxsat bo'lmasa, adminga xabar berish
+        if (!Boolean.TRUE.equals(user.getHasAccess())) {
+            String adminMsg = String.format(
+                    "<b>🆕 Yangi foydalanuvchi!</b>\n\n" +
+                            "👤 Ism: %s\n" +
+                            "🆔 ID: <code>%d</code>\n" +
+                            "🔗 Username: @%s\n\n" +
+                            "Tasdiqlash: /verify_%d",
+                    tgUser.getFirstName(),
+                    chatId,
+                    (tgUser.getUserName() != null ? tgUser.getUserName() : "yo'q"),
+                    chatId
+            );
+            sendTextMessage(Long.parseLong(botConfig.getAdminId()), adminMsg);
+            sendTextMessage(chatId, "👋 *Xush kelibsiz!*\n\nTestga kirish uchun ruxsat berilmagan. Iltimos, adminga murojaat qiling va to'lovni tasdiqlang.");
+        } else {
+            sendTextMessage(chatId, "Sizda ruxsat bor. Testni boshlash uchun /test ni bosing.");
+        }
     }
 
     private void processVerification(String text) {
@@ -139,11 +145,11 @@ public class RashBot extends TelegramLongPollingBot {
             userRepository.findById(targetId).ifPresentOrElse(user -> {
                 user.setHasAccess(true);
                 userRepository.save(user);
-                sendTextMessage(targetId, "✅ Ruxsat berildi! /test ni bosing.");
-                sendTextMessage(Long.parseLong(botConfig.getAdminId()), "User " + targetId + " aktivlashdi.");
-            }, () -> sendTextMessage(Long.parseLong(botConfig.getAdminId()), "User topilmadi."));
+                sendTextMessage(targetId, "✅ *To'lovingiz tasdiqlandi!* \nEndi /test komandasi orqali testni boshlashingiz mumkin.");
+                sendTextMessage(Long.parseLong(botConfig.getAdminId()), "✅ Foydalanuvchi (ID: " + targetId + ") aktivlashtirildi.");
+            }, () -> sendTextMessage(Long.parseLong(botConfig.getAdminId()), "❌ Foydalanuvchi topilmadi."));
         } catch (Exception e) {
-            sendTextMessage(Long.parseLong(botConfig.getAdminId()), "Xato format.");
+            sendTextMessage(Long.parseLong(botConfig.getAdminId()), "❌ ID xato formatda.");
         }
     }
 
@@ -167,7 +173,7 @@ public class RashBot extends TelegramLongPollingBot {
         state.setCurrentQuestion(question);
         String caption = "Savol №" + question.getId();
         if (Boolean.TRUE.equals(question.getIsDoubleAnswer())) {
-            caption += (state.getPendingSubQuestion() == null ? " (a)" : " (b)");
+            caption += (state.getPendingSubQuestion() == null ? " (a-qismi)" : " (b-qismi)");
         }
 
         try {
@@ -182,7 +188,7 @@ public class RashBot extends TelegramLongPollingBot {
             }
             execute(photo);
         } catch (Exception e) {
-            sendTextMessage(chatId, "Rasm yuklashda xato, lekin savol №" + question.getId() + ". Javobingizni yozing:");
+            sendTextMessage(chatId, caption + "\n\n[Javobingizni yozing yoki variant tanlang]");
         }
     }
 
@@ -195,8 +201,7 @@ public class RashBot extends TelegramLongPollingBot {
         state.next();
         sendQuestion(chatId);
 
-        // Callbackni yopish (yuklanish belgisi yo'qolishi uchun)
-        try { execute(new org.telegram.telegrambots.meta.api.methods.AnswerCallbackQuery(query.getId())); } catch (Exception ignored) {}
+        try { execute(new AnswerCallbackQuery(query.getId())); } catch (Exception ignored) {}
     }
 
     private void handleTextAnswer(Long chatId, String text) {
@@ -239,20 +244,22 @@ public class RashBot extends TelegramLongPollingBot {
         test.setLevel(raschService.getLevel(theta));
 
         userTestRepository.save(test);
-        sendTextMessage(chatId, "🏁 Test tugadi. Sertifikat tayyorlanmoqda...");
+
+        sendTextMessage(chatId, "🏁 *Test yakunlandi!* \nNatijangiz hisoblanmoqda va sertifikat generatsiya qilinmoqda...");
 
         try {
             ByteArrayInputStream bis = pdfService.generateResultPdf(test);
             SendDocument doc = new SendDocument(chatId.toString(), new InputFile(bis, "Sertifikat.pdf"));
+            doc.setCaption("Sizning natijangiz.");
             execute(doc);
         } catch (Exception e) {
-            sendTextMessage(chatId, "PDF yuborishda xatolik.");
+            sendTextMessage(chatId, "⚠️ Sertifikat yuborishda xatolik yuz berdi.");
         }
     }
 
     private void sendTextMessage(Long chatId, String text) {
         SendMessage msg = new SendMessage(chatId.toString(), text);
-        msg.setParseMode("Markdown");
+        msg.setParseMode("HTML");
         try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
     }
 
