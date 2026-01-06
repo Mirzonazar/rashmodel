@@ -60,7 +60,7 @@ public class RashBot extends TelegramLongPollingBot {
 
     @Override
     public void onUpdateReceived(Update update) {
-        if (update.hasMessage() && update.getMessage().hasText()) {
+        if (update.hasMessage()) {
             handleMessage(update.getMessage());
         } else if (update.hasCallbackQuery()) {
             handleCallback(update.getCallbackQuery());
@@ -68,160 +68,190 @@ public class RashBot extends TelegramLongPollingBot {
     }
 
     private void handleMessage(Message message) {
-        String text = message.getText();
         Long chatId = message.getChatId();
-        User tgUser = message.getFrom();
-        String adminIdStr = botConfig.getAdminId();
+        String text = message.getText();
+        if (text == null) return;
 
-        boolean isAdmin = chatId.toString().equals(adminIdStr);
-
-        // 1. Admin uchun aktivlashtirish buyrug'i
-        if (isAdmin && text.startsWith("/verify_")) {
-            processVerification(text);
-            return;
-        }
-
-        // 2. Start buyrug'i
         if (text.equals("/start")) {
-            if (isAdmin) {
-                sendTextMessage(chatId, "📌 *Xush kelibsiz, Admin!*\nSizda tizimga to'liq ruxsat bor. Yangi foydalanuvchilar haqida xabarnomalarni shu yerda olasiz.\n\nTestni tekshirish uchun: /test");
-                AppUser adminUser = userRepository.findById(chatId).orElse(new AppUser(chatId, tgUser.getFirstName(), tgUser.getUserName(), true));
-                adminUser.setHasAccess(true);
-                userRepository.save(adminUser);
-            } else {
-                registerAndNotifyAdmin(tgUser, chatId);
+            registerAndNotifyAdmin(chatId, message.getFrom());
+            sendTextMessage(chatId, "Assalomu alaykum!\nMatematika darajasini aniqlash testiga xush kelibsiz!\n\n/test — testni boshlash");
+        } else if (text.equals("/test")) {
+            startTestProcess(chatId);
+        } else if (text.startsWith("/verify_") && String.valueOf(chatId).equals(botConfig.getAdminId())) {
+            handleVerifyCommand(chatId, text);
+        } else {
+            TestState state = states.get(chatId);
+            if (state != null && !state.getTest().getIsFinished()) {
+                handleTextAnswer(chatId, text, state);
             }
-            return;
-        }
-
-        // 3. Testni boshlash
-        if (text.equals("/test")) {
-            AppUser user = userRepository.findById(chatId).orElse(null);
-            if (isAdmin || (user != null && Boolean.TRUE.equals(user.getHasAccess()))) {
-                startTestProcess(chatId);
-            } else {
-                sendTextMessage(chatId, "⛔️ *Sizda ruxsat mavjud emas!*\n\nTestda ishtirok etish uchun to'lovni amalga oshiring va adminga murojaat qiling.");
-            }
-            return;
-        }
-
-        // 4. Test davomida ochiq savollarga javob berish
-        if (states.containsKey(chatId)) {
-            handleTextAnswer(chatId, text);
         }
     }
 
-    private void registerAndNotifyAdmin(User tgUser, Long chatId) {
-        AppUser user = userRepository.findById(chatId).orElse(null);
+    private void handleCallback(CallbackQuery callbackQuery) {
+        Long chatId = callbackQuery.getMessage().getChatId();
+        String data = callbackQuery.getData();
 
-        if (user == null) {
-            user = new AppUser(chatId, tgUser.getFirstName(), tgUser.getUserName(), false);
+        TestState state = states.get(chatId);
+        if (state == null) return;
+
+        try {
+            execute(new AnswerCallbackQuery(callbackQuery.getId()));
+        } catch (Exception ignored) {}
+
+        Question q = state.getCurrentQuestion();
+        testService.processSingleAnswer(state.getTest(), q, data);
+        state.next();
+        sendQuestion(chatId);
+    }
+
+    private void registerAndNotifyAdmin(Long chatId, User from) {
+        AppUser user = userRepository.findById(chatId).orElse(null);
+        boolean isNew = (user == null);
+
+        if (isNew) {
+            user = new AppUser();
+            user.setId(chatId);
+            user.setFirstName(from.getFirstName());
+            user.setUsername(from.getUserName());
+            user.setHasAccess(false);
             userRepository.save(user);
         }
 
-        // Agar userda ruxsat bo'lmasa, adminga xabar berish
-        if (!Boolean.TRUE.equals(user.getHasAccess())) {
-            String adminMsg = String.format(
-                    "<b>🆕 Yangi foydalanuvchi!</b>\n\n" +
-                            "👤 Ism: %s\n" +
-                            "🆔 ID: <code>%d</code>\n" +
-                            "🔗 Username: @%s\n\n" +
-                            "Tasdiqlash: /verify_%d",
-                    tgUser.getFirstName(),
-                    chatId,
-                    (tgUser.getUserName() != null ? tgUser.getUserName() : "yo'q"),
-                    chatId
-            );
-            sendTextMessage(Long.parseLong(botConfig.getAdminId()), adminMsg);
-            sendTextMessage(chatId, "👋 *Xush kelibsiz!*\n\nTestga kirish uchun ruxsat berilmagan. Iltimos, adminga murojaat qiling va to'lovni tasdiqlang.");
-        } else {
-            sendTextMessage(chatId, "Sizda ruxsat bor. Testni boshlash uchun /test ni bosing.");
-        }
+        // Admin xabari — Markdownsiz, eng sodda shaklda
+        String status = isNew ? "YANGI" : "qayta";
+        String msg = status + " foydalanuvchi:\n" +
+                "ID: " + chatId + "\n" +
+                "Ism: " + from.getFirstName() + "\n" +
+                "Username: " + (from.getUserName() != null ? "@" + from.getUserName() : "yo'q") + "\n" +
+                "Tasdiqlash: /verify_" + chatId;
+
+        sendTextMessage(Long.parseLong(botConfig.getAdminId()), msg);
+
+        sendTextMessage(chatId, "Xush kelibsiz! /test buyrug'i bilan testni boshlashingiz mumkin.");
     }
 
-    private void processVerification(String text) {
+    private void handleVerifyCommand(Long chatId, String text) {
         try {
-            Long targetId = Long.parseLong(text.replace("/verify_", ""));
-            userRepository.findById(targetId).ifPresentOrElse(user -> {
-                user.setHasAccess(true);
-                userRepository.save(user);
-                sendTextMessage(targetId, "✅ *To'lovingiz tasdiqlandi!* \nEndi /test komandasi orqali testni boshlashingiz mumkin.");
-                sendTextMessage(Long.parseLong(botConfig.getAdminId()), "✅ Foydalanuvchi (ID: " + targetId + ") aktivlashtirildi.");
-            }, () -> sendTextMessage(Long.parseLong(botConfig.getAdminId()), "❌ Foydalanuvchi topilmadi."));
+            Long targetId = Long.parseLong(text.substring(8).trim());
+            AppUser target = userRepository.findById(targetId).orElse(null);
+            if (target != null) {
+                target.setHasAccess(true);
+                target.setAccessGrantedAt(LocalDateTime.now());
+                target.setAccessExpiresAt(LocalDateTime.now().plusDays(30));
+                userRepository.save(target);
+
+                sendTextMessage(chatId, "✅ " + targetId + " uchun kirish faollashtirildi (30 kun).");
+                sendTextMessage(targetId, "🎉 Tabriklaymiz! Endi testdan o'tishingiz mumkin.\n/test buyrug'ini yuboring.");
+            } else {
+                sendTextMessage(chatId, "⚠️ Foydalanuvchi topilmadi.");
+            }
         } catch (Exception e) {
-            sendTextMessage(Long.parseLong(botConfig.getAdminId()), "❌ ID xato formatda.");
+            sendTextMessage(chatId, "Xatolik: " + e.getMessage());
         }
     }
 
     private void startTestProcess(Long chatId) {
+        AppUser user = userRepository.findById(chatId).orElse(null);
+        boolean isAdmin = String.valueOf(chatId).equals(botConfig.getAdminId());
+
+        if (!isAdmin) {
+            if (user == null || !user.isAccessActive()) {
+                if (user != null && Boolean.TRUE.equals(user.getHasAccess())) {
+                    sendTextMessage(chatId, "⏰ Kirish huquqingiz muddati tugagan.\nQayta to'lov qiling va admin bilan bog'laning.");
+                } else {
+                    sendTextMessage(chatId, "🔒 Testdan o'tish uchun to'lov talab qilinadi.\nAdmin bilan bog'laning.");
+                }
+                return;
+            }
+        }
+
+        // Admin bo'lsa yoki to'lov bor bo'lsa davom etamiz
+        UserTest existing = userTestRepository.findLatestOpenTest(chatId, false);
+        if (existing != null) {
+            sendTextMessage(chatId, "Davom etayotgan test topildi. Uni davom ettiramiz.");
+            TestState state = new TestState(existing);
+            states.put(chatId, state);
+            sendQuestion(chatId);
+            return;
+        }
+
         UserTest test = testService.startNewTest(chatId, "MATEMATIKA");
         userTestRepository.save(test);
+
         TestState state = new TestState(test);
         states.put(chatId, state);
+
+        sendTextMessage(chatId, "Test boshlandi! Jami 45 ta savol.");
         sendQuestion(chatId);
     }
 
     private void sendQuestion(Long chatId) {
         TestState state = states.get(chatId);
-        Question question = questionRepository.findById((long) state.getCurrentStep() + 1).orElse(null);
+        if (state == null) return;
 
-        if (question == null) {
+        if (state.isLast()) {
             finishTest(chatId);
             return;
         }
 
-        state.setCurrentQuestion(question);
-        String caption = "Savol №" + question.getId();
-        if (Boolean.TRUE.equals(question.getIsDoubleAnswer())) {
-            caption += (state.getPendingSubQuestion() == null ? " (a-qismi)" : " (b-qismi)");
+        int step = state.getCurrentStep();
+        Question question = questionRepository.findById((long) (step + 1)).orElse(null);
+        if (question == null) {
+            sendTextMessage(chatId, "Xatolik: savol topilmadi.");
+            return;
         }
+
+        state.setCurrentQuestion(question);
+
+        String caption = "Savol " + (step + 1) + "/45";
+        if (question.getIsDoubleAnswer()) {
+            String part = state.getPendingSubQuestion() != null ? " (b-qismi)" : " (a-qismi)";
+            caption += part;
+        }
+
+        SendPhoto photo = new SendPhoto();
+        photo.setChatId(chatId.toString());
+        photo.setCaption(caption);
 
         try {
-            InputStream is = new ClassPathResource(question.getInternalPath()).getInputStream();
-            SendPhoto photo = new SendPhoto(chatId.toString(), new InputFile(is, question.getId() + ".png"));
-            photo.setCaption(caption);
+            ClassPathResource resource = new ClassPathResource(question.getInternalPath());
+            InputStream is = resource.getInputStream();
+            photo.setPhoto(new InputFile(is, question.getId() + ".png"));
 
-            if (question.getId() <= 32) {
-                photo.setReplyMarkup(createOptionsKeyboard());
-            } else if (question.getId() <= 35) {
-                photo.setReplyMarkup(createMatchingKeyboard());
+            if (!question.getIsDoubleAnswer()) {
+                if (question.getIsBlockQuestion()) {
+                    photo.setReplyMarkup(createMatchingKeyboard());
+                } else if (question.getQuestionGroup().equals("1_32")) {
+                    photo.setReplyMarkup(createOptionsKeyboard());
+                }
             }
+
             execute(photo);
         } catch (Exception e) {
-            sendTextMessage(chatId, caption + "\n\n[Javobingizni yozing yoki variant tanlang]");
+            sendTextMessage(chatId, "Rasm yuklanmadi.\nJavobingizni yozing (savol ID: " + question.getId() + ")");
         }
     }
 
-    private void handleCallback(CallbackQuery query) {
-        Long chatId = query.getMessage().getChatId();
-        TestState state = states.get(chatId);
-        if (state == null) return;
-
-        testService.processSingleAnswer(state.getTest(), state.getCurrentQuestion(), query.getData());
-        state.next();
-        sendQuestion(chatId);
-
-        try { execute(new AnswerCallbackQuery(query.getId())); } catch (Exception ignored) {}
-    }
-
-    private void handleTextAnswer(Long chatId, String text) {
-        TestState state = states.get(chatId);
+    private void handleTextAnswer(Long chatId, String text, TestState state) {
         Question q = state.getCurrentQuestion();
+        UserTest test = state.getTest();
 
-        if (Boolean.TRUE.equals(q.getIsDoubleAnswer())) {
+        if (q.getIsDoubleAnswer()) {
             if (state.getPendingSubQuestion() == null) {
-                state.setTempAnswerA(text);
+                state.setTempAnswerA(text.trim());
                 state.setPendingSubQuestion("b");
-                sendQuestion(chatId);
+                sendTextMessage(chatId, "a-qismi qabul qilindi!\nEndi b-qismiga javob yozing:");
+                return;
             } else {
-                testService.processDoubleAnswerPart(state.getTest(), q, state.getTempAnswerA(), "a");
-                testService.processDoubleAnswerPart(state.getTest(), q, text, "b");
+                testService.processDoubleAnswerPart(test, q, state.getTempAnswerA(), "a");
+                testService.processDoubleAnswerPart(test, q, text.trim(), "b");
                 state.setPendingSubQuestion(null);
+                state.setTempAnswerA(null);
                 state.next();
                 sendQuestion(chatId);
             }
         } else {
-            testService.processSingleAnswer(state.getTest(), q, text);
+            testService.processSingleAnswer(test, q, text.trim());
             state.next();
             sendQuestion(chatId);
         }
@@ -235,32 +265,41 @@ public class RashBot extends TelegramLongPollingBot {
         test.setIsFinished(true);
         test.setFinishedAt(LocalDateTime.now());
 
-        List<Boolean> results = test.getAnswers().stream().map(UserAnswer::getCorrect).collect(Collectors.toList());
-        List<Question> questions = test.getAnswers().stream().map(UserAnswer::getQuestion).collect(Collectors.toList());
+        List<UserAnswer> answers = test.getAnswers();
+        List<Question> questions = answers.stream().map(UserAnswer::getQuestion).collect(Collectors.toList());
+        List<Boolean> results = answers.stream().map(UserAnswer::getCorrect).collect(Collectors.toList());
 
         double theta = RaschCalculator.calculateAbility(questions, results);
         test.setAbilityScore(theta);
-        test.setCorrectCount((int) results.stream().filter(r -> r).count());
+        test.setCorrectCount((int) results.stream().filter(Boolean::booleanValue).count());
         test.setLevel(raschService.getLevel(theta));
 
         userTestRepository.save(test);
 
-        sendTextMessage(chatId, "🏁 *Test yakunlandi!* \nNatijangiz hisoblanmoqda va sertifikat generatsiya qilinmoqda...");
+        sendTextMessage(chatId, "🏁 Test yakunlandi!\nNatija hisoblanmoqda...");
 
         try {
             ByteArrayInputStream bis = pdfService.generateResultPdf(test);
-            SendDocument doc = new SendDocument(chatId.toString(), new InputFile(bis, "Sertifikat.pdf"));
-            doc.setCaption("Sizning natijangiz.");
+            SendDocument doc = new SendDocument();
+            doc.setChatId(chatId.toString());
+            doc.setDocument(new InputFile(bis, "Sertifikat.pdf"));
+            doc.setCaption("Natijangiz va sertifikatingiz.");
             execute(doc);
         } catch (Exception e) {
-            sendTextMessage(chatId, "⚠️ Sertifikat yuborishda xatolik yuz berdi.");
+            sendTextMessage(chatId, "Sertifikat yuborishda xatolik yuz berdi.");
         }
     }
 
     private void sendTextMessage(Long chatId, String text) {
-        SendMessage msg = new SendMessage(chatId.toString(), text);
-        msg.setParseMode("HTML");
-        try { execute(msg); } catch (TelegramApiException e) { e.printStackTrace(); }
+        SendMessage msg = new SendMessage();
+        msg.setChatId(chatId.toString());
+        msg.setText(text);
+        // ParseMode qo'yilmaydi — xavfsizroq
+        try {
+            execute(msg);
+        } catch (TelegramApiException e) {
+            System.err.println("Xabar yuborishda xato (chatId: " + chatId + "): " + e.getMessage());
+        }
     }
 
     private InlineKeyboardMarkup createOptionsKeyboard() {
